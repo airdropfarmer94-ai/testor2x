@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ORE Bot – FINAL WORKING</title>
+  <script src="https://unpkg.com/@solana/web3.js@1.95.2/lib/index.iife.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+  <script src="https://auth.privy.io/v1/privy.js"></script>
+  <style>
+    body{margin:0;background:#000;color:#0f0;font-family:Arial;text-align:center;padding:20px;}
+    h1{font-size:40px;margin:30px;}
+    #grid{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;max-width:420px;margin:40px auto;}
+    .tile{width:70px;height:70px;background:#b8860b;color:white;font-size:28px;font-weight:bold;
+          display:flex;align-items:center;justify-content:center;cursor:pointer;border:4px solid #333;border-radius:12px;}
+    .tile.selected{background:#00ff00;color:black;border:4px solid #00ff00;box-shadow:0 0 20px #0f0;}
+    .tile.winning{animation:pulse 1s infinite;background:#00ff00 !important;}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.6}}
+    button{padding:18px 36px;margin:20px;background:#00ff00;color:black;border:none;
+           border-radius:12px;font-size:22px;font-weight:bold;cursor:pointer;}
+    button:disabled{background:#333;}
+    button.stop{background:#ff0033;}
+    .log{background:#111;padding:20px;height:350px;overflow:auto;margin:30px auto;
+         max-width:700px;border-radius:12px;font-family:monospace;font-size:15px;border:1px solid #0f0;}
+    input{padding:15px;width:280px;margin:15px;border-radius:12px;background:#222;color:#0f0;
+          border:2px solid #0f0;font-size:18px;text-align:center;}
+  </style>
+</head>
+<body>
+
+<h1>ORE Custom Tiles Bot</h1>
+<div id="root">Loading… (2 seconds)</div>
+
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+const PRIVY_APP_ID = "cmi8rgcw9008nl30cnnxgn9mw";   // ← CHANGE THIS
+const RPC = "https://mainnet.helius-rpc.com/?api-key=8952f5e0-8f66-465a-8a4c-29152df1f3cd";
+const ORE_PROGRAM = "oreoN2tQ9mS2T3jBkvTjR4i5g6kZ2Z2Z2Z2Z2Z2Z2Z2Z2Z2Z";
+
+function App() {
+  const [wallet, setWallet] = useState(null);
+  const [balance, setBalance] = useState(0);
+  const [tiles, setTiles] = useState([]);
+  const [perTile, setPerTile] = useState(0.0001);
+  const [totalBet, setTotalBet] = useState(0);
+  const [streak, setStreak] = useState(0);
+  const [running, setRunning] = useState(false);
+  const [log, setLog] = useState(["Bot ready – click SIGN IN"]);
+
+  const logMsg = m => setLog(l => [...l.slice(-30), `${new Date().toLocaleTimeString()}: ${m}`]);
+
+  useEffect(() => {
+    if (!window.Privy) {
+      setTimeout(() => document.getElementById("root").innerHTML = "<h1>Privy failed to load – check internet</h1>", 5000);
+      return;
+    }
+    const privy = new window.Privy({ appId: PRIVY_APP_ID });
+    privy.on('login', async user => {
+      setWallet(user.wallet);
+      logMsg("Connected: " + user.wallet.address.slice(0,8)+"...");
+      const conn = new solanaWeb3.Connection(RPC);
+      const bal = await conn.getBalance(new solanaWeb3.PublicKey(user.wallet.address));
+      setBalance(bal/1e9);
+    });
+    window.privy = privy;
+  }, []);
+
+  const toggle = i => running ? null : setTiles(t => t.includes(i)?t.filter(x=>x!==i):[...t,i].sort((a,b)=>a-b));
+
+  const start = () => {
+    if(tiles.length===0) return alert("Select tiles!");
+    setTotalBet(tiles.length * perTile);
+    setRunning(true);
+    setStreak(0);
+    logMsg(`STARTED – ${tiles.length} tiles @ ${perTile} SOL`);
+    setTimeout(bet, 2000);
+  };
+
+  const bet = async () => {
+    if(!running) return;
+    const lamports = Math.floor((totalBet/tiles.length)*1e9);
+    const conn = new solanaWeb3.Connection(RPC);
+    const ixs = tiles.map(t => new solanaWeb3.TransactionInstruction({
+      programId: new solanaWeb3.PublicKey(ORE_PROGRAM),
+      keys: [
+        {pubkey:new solanaWeb3.PublicKey(wallet.address),isSigner:true,isWritable:true},
+        {pubkey:new solanaWeb3.PublicKey(ORE_PROGRAM),isSigner:false,isWritable:true}
+      ],
+      data: Buffer.from([2,t,...new Uint8Array(new BigUint64Array([BigInt(lamports)]).buffer)])
+    }));
+    try {
+      const tx = new solanaWeb3.Transaction().add(...ixs);
+      tx.recentBlockhash = (await conn.getLatestBlockhash()).blockhash;
+      tx.feePayer = new solanaWeb3.PublicKey(wallet.address);
+      const signed = await wallet.signTransaction(tx);
+      const sig = await conn.sendRawTransaction(signed.serialize());
+      logMsg(`Bet ${totalBet.toFixed(6)} SOL → ${sig.slice(0,8)}...`);
+      setTimeout(check,65000);
+    } catch(e){ logMsg("Error: "+e.message); setTimeout(bet,10000); }
+  };
+
+  const check = async () => {
+    if(!running) return;
+    const d = await (await fetch("https://ore.supply/api/recent?limit=1")).json();
+    const win = d[0].winning_tile;
+    document.querySelectorAll('.tile')[win].classList.add('winning');
+    setTimeout(()=>document.querySelectorAll('.tile')[win].classList.remove('winning'),5000);
+    if(tiles.includes(win)){
+      logMsg(`HIT ${win+1}!!! Resetting`);
+      setStreak(0); setTotalBet(tiles.length*perTile);
+    } else {
+      const next = totalBet*2;
+      setStreak(s=>s+1);
+      setTotalBet(next>balance*0.8?tiles.length*perTile:next);
+      logMsg(`Miss – next ${totalBet.toFixed(6)} SOL`);
+    }
+    const b = await new solanaWeb3.Connection(RPC).getBalance(new solanaWeb3.PublicKey(wallet.address));
+    setBalance(b/1e9);
+    if(running) setTimeout(bet,62000);
+  };
+
+  return (
+    <div>
+      {!wallet ? 
+        <button onClick={()=>window.privy?.login()}>SIGN IN WITH PRIVY</button> :
+        <>
+          <p>Balance: {balance.toFixed(4)} SOL</p>
+          <div id="grid">
+            {Array.from({length:25},(_,i)=>
+              <div key={i} className={`tile ${tiles.includes(i)?'selected':''}`} onClick={()=>toggle(i)}>{i+1}</div>
+            )}
+          </div>
+          <p>Tiles: {tiles.map(t=>t+1).join(", ")||"..."}</p>
+          <input type="number" step="0.000001" defaultValue="0.0001" onChange={e=>setPerTile(parseFloat(e.target.value)||0.0001)}/>
+          <br/>
+          <button onClick={start} disabled={running}>START BOT</button>
+          {running && <button className="stop" onClick={()=>setRunning(false)}>STOP</button>}
+          <p>Current bet: {totalBet.toFixed(6)} SOL | Streak: {streak}</p>
+          <div className="log">{log.map((l,i)=><div key={i}>{l}</div>)}</div>
+        </>
+      }
+    </div>
+  );
+}
+
+ReactDOM.render(React.createElement(App), document.getElementById("root"));
+</script>
+</body>
+</html>
